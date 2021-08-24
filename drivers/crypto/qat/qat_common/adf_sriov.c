@@ -38,15 +38,16 @@ static void adf_vf2pf_bh_handler(void *data)
 	queue_work(pf2vf_resp_wq, &pf2vf_resp->pf2vf_resp_work);
 }
 
-static int adf_enable_sriov(struct adf_accel_dev *accel_dev)
+static int adf_enable_sriov(struct adf_accel_dev *accel_dev, int numvfs)
 {
 	struct pci_dev *pdev = accel_to_pci_dev(accel_dev);
-	int totalvfs = pci_sriov_get_totalvfs(pdev);
+	/*int totalvfs = pci_sriov_get_totalvfs(pdev);*/
+
 	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
 	struct adf_accel_vf_info *vf_info;
 	int i;
 
-	for (i = 0, vf_info = accel_dev->pf.vf_info; i < totalvfs;
+	for (i = 0, vf_info = accel_dev->pf.vf_info; i < numvfs;
 	     i++, vf_info++) {
 		/* This ptr will be populated when VFs will be created */
 		vf_info->accel_dev = accel_dev;
@@ -67,15 +68,17 @@ static int adf_enable_sriov(struct adf_accel_dev *accel_dev)
 
 	/* Enable VF to PF interrupts for all VFs */
 	if (hw_data->get_pf2vf_offset)
-		adf_enable_vf2pf_interrupts(accel_dev, BIT_ULL(totalvfs) - 1);
+		adf_enable_vf2pf_interrupts(accel_dev, BIT_ULL(numvfs) - 1);
 
 	/*
 	 * Due to the hardware design, when SR-IOV and the ring arbiter
 	 * are enabled all the VFs supported in hardware must be enabled in
 	 * order for all the hardware resources (i.e. bundles) to be usable.
 	 * When SR-IOV is enabled, each of the VFs will own one bundle.
+	 *
+	 * return pci_enable_sriov(pdev, totalvfs);
 	 */
-	return pci_enable_sriov(pdev, totalvfs);
+	return pci_enable_sriov(pdev, numvfs);
 }
 
 /**
@@ -89,7 +92,8 @@ static int adf_enable_sriov(struct adf_accel_dev *accel_dev)
 void adf_disable_sriov(struct adf_accel_dev *accel_dev)
 {
 	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
-	int totalvfs = pci_sriov_get_totalvfs(accel_to_pci_dev(accel_dev));
+	/* int totalvfs = pci_sriov_get_totalvfs(accel_to_pci_dev(accel_dev)); */
+	int num_vfs_en = pci_num_vf(accel_to_pci_dev(accel_dev));
 	struct adf_accel_vf_info *vf;
 	int i;
 
@@ -109,7 +113,7 @@ void adf_disable_sriov(struct adf_accel_dev *accel_dev)
 	if (hw_data->configure_iov_threads)
 		hw_data->configure_iov_threads(accel_dev, false);
 
-	for (i = 0, vf = accel_dev->pf.vf_info; i < totalvfs; i++, vf++) {
+	for (i = 0, vf = accel_dev->pf.vf_info; i < num_vfs_en; i++, vf++) {
 		tasklet_disable(&vf->vf2pf_bh_tasklet);
 		tasklet_kill(&vf->vf2pf_bh_tasklet);
 		mutex_destroy(&vf->pf2vf_lock);
@@ -135,7 +139,7 @@ EXPORT_SYMBOL_GPL(adf_disable_sriov);
 int adf_sriov_configure(struct pci_dev *pdev, int numvfs)
 {
 	struct adf_accel_dev *accel_dev = adf_devmgr_pci_to_accel_dev(pdev);
-	int totalvfs = pci_sriov_get_totalvfs(pdev);
+	/* int totalvfs = pci_sriov_get_totalvfs(pdev); */
 	unsigned long val;
 	int ret;
 
@@ -150,6 +154,11 @@ int adf_sriov_configure(struct pci_dev *pdev, int numvfs)
 	if (accel_dev->pf.vf_info) {
 		dev_info(&pdev->dev, "Already enabled for this device\n");
 		return -EINVAL;
+	}
+
+	if (!numvfs) {
+		adf_disable_sriov(accel_dev);
+		return 0;
 	}
 
 	if (adf_dev_started(accel_dev)) {
@@ -173,7 +182,7 @@ int adf_sriov_configure(struct pci_dev *pdev, int numvfs)
 	set_bit(ADF_STATUS_CONFIGURED, &accel_dev->status);
 
 	/* Allocate memory for VF info structs */
-	accel_dev->pf.vf_info = kcalloc(totalvfs,
+	accel_dev->pf.vf_info = kcalloc(numvfs,
 					sizeof(struct adf_accel_vf_info),
 					GFP_KERNEL);
 	if (!accel_dev->pf.vf_info)
@@ -191,7 +200,7 @@ int adf_sriov_configure(struct pci_dev *pdev, int numvfs)
 		return -EFAULT;
 	}
 
-	ret = adf_enable_sriov(accel_dev);
+	ret = adf_enable_sriov(accel_dev, numvfs);
 	if (ret)
 		return ret;
 
